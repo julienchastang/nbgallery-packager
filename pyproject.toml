@@ -1,0 +1,13 @@
+[project]
+name = "nbgallery-packager"
+version = "0.1.0"
+description = "Package notebooks from a public git repository for nbgallery bulk upload"
+requires-python = ">=3.9"
+dependencies = ["PyYAML>=6.0"]
+
+[project.scripts]
+nbgallery-packager = "nbgallery_packager:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

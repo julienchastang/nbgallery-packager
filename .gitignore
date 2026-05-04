@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.envrc
+dist/
+build/
+*.tar.gz
+.*.swp
+

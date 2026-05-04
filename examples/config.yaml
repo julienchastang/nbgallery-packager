@@ -1,0 +1,10 @@
+owner: "example_group"
+owner_type: "Group"
+updater: "example_user"
+creator: "example_user"
+public: true
+tags:
+  - training
+strip_path_prefixes:
+  - notebooks
+
