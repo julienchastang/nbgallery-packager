@@ -1,6 +1,6 @@
 # nbgallery-packager
 
-Package notebooks from a public git repository into a flat `.tar.gz` archive for nbgallery bulk upload.
+Package notebooks from a public git repository into a flat `.tar.gz` archive for [nbgallery](https://nbgallery.github.io/ "nbgallery") [bulk upload](https://github.com/nbgallery/nbgallery/blob/main/docs/configuration.md "bulk upload").
 
 ## Dependencies
 
