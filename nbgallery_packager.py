@@ -6,7 +6,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import Optional, Union, cast
 
 import yaml
 
@@ -14,10 +16,30 @@ import yaml
 DEFAULT_DESCRIPTION = "Automatically Uploaded"
 REQUIRED_CONFIG_KEYS = ("owner", "owner_type", "updater", "creator")
 
+ConfigValue = Union[str, bool, list[str]]
+Config = dict[str, ConfigValue]
+MetadataItem = dict[str, ConfigValue]
+Metadata = dict[str, MetadataItem]
+PlannedNotebook = tuple[Path, str]
+PlannedNotebooks = list[PlannedNotebook]
+Warnings = list[str]
+PathInput = Union[str, Path]
+MarkdownSource = Union[str, list[str], None]
+NotebookJson = dict[str, Union[str, list[object]]]
 
-def load_config(path):
+
+class ParsedArgs(argparse.Namespace):
+    repo_url: str = ""
+    config: str = ""
+    output: str = ""
+    dry_run: bool = False
+    keep_staging: bool = False
+
+
+def load_config(path: PathInput) -> Config:
     with Path(path).open(encoding="utf-8") as config_file:
-        config = yaml.safe_load(config_file) or {}
+        loaded_config = cast(object, yaml.safe_load(config_file))
+        config: object = loaded_config or {}
 
     if not isinstance(config, dict):
         raise ValueError("Config must be a YAML mapping")
@@ -33,10 +55,10 @@ def load_config(path):
     ):
         raise ValueError("Config key 'strip_path_prefixes' must be a list")
 
-    return config
+    return cast(Config, config)
 
 
-def strip_path_prefix(relative_path, prefixes):
+def strip_path_prefix(relative_path: Path, prefixes: Iterable[str]) -> Path:
     for prefix in prefixes:
         prefix_path = Path(prefix)
         prefix_parts = prefix_path.parts
@@ -45,25 +67,25 @@ def strip_path_prefix(relative_path, prefixes):
     return relative_path
 
 
-def output_name_for(relative_path):
+def output_name_for(relative_path: Path) -> str:
     if len(relative_path.parts) == 1:
         return relative_path.name
     return "__".join(relative_path.parts)
 
 
-def find_notebooks(repo_dir):
-    notebooks = []
+def find_notebooks(repo_dir: Path) -> list[Path]:
+    notebooks: list[Path] = []
     for path in repo_dir.rglob("*.ipynb"):
         if ".git" not in path.relative_to(repo_dir).parts:
             notebooks.append(path)
     return sorted(notebooks)
 
 
-def title_from_stem(stem):
+def title_from_stem(stem: str) -> str:
     return stem.replace("_", " ").replace("-", " ").strip()
 
 
-def first_markdown_heading(markdown):
+def first_markdown_heading(markdown: MarkdownSource) -> Optional[str]:
     if isinstance(markdown, list):
         markdown = "".join(markdown)
     lines = str(markdown or "").splitlines()
@@ -82,7 +104,7 @@ def first_markdown_heading(markdown):
     return None
 
 
-def strip_first_markdown_heading(markdown):
+def strip_first_markdown_heading(markdown: MarkdownSource) -> str:
     if isinstance(markdown, list):
         markdown = "".join(markdown)
     lines = str(markdown or "").splitlines()
@@ -97,10 +119,10 @@ def strip_first_markdown_heading(markdown):
         ):
             return "\n".join(lines[:index] + lines[index + 2 :])
 
-    return markdown
+    return str(markdown or "")
 
 
-def markdown_to_description(markdown):
+def markdown_to_description(markdown: MarkdownSource) -> tuple[str, bool]:
     if isinstance(markdown, list):
         markdown = "".join(markdown)
     markdown = str(markdown or "").strip()
@@ -116,18 +138,33 @@ def markdown_to_description(markdown):
     return markdown, False
 
 
-def notebook_metadata(path, display_path, fallback_title):
+def notebook_metadata(
+    path: Path, display_path: Path, fallback_title: str
+) -> tuple[str, str, Warnings]:
     try:
-        notebook = json.loads(path.read_text(encoding="utf-8"))
+        notebook = cast(NotebookJson, json.loads(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"Could not read notebook '{path}': {error}") from error
 
-    title = None
-    first_markdown = None
+    title: Optional[str] = None
+    first_markdown: MarkdownSource = None
 
-    for cell in notebook.get("cells", []):
+    cells = notebook.get("cells", [])
+    if not isinstance(cells, list):
+        cells = []
+
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
         if cell.get("cell_type") == "markdown":
-            source = cell.get("source", "")
+            raw_source: object = cell.get("source", "")
+            source: MarkdownSource
+            if isinstance(raw_source, list):
+                source = [str(part) for part in raw_source]
+            elif raw_source is None:
+                source = None
+            else:
+                source = str(raw_source)
             if first_markdown is None:
                 first_markdown = source
             if title is None:
@@ -144,7 +181,7 @@ def notebook_metadata(path, display_path, fallback_title):
         description_source = strip_first_markdown_heading(description_source)
 
     description, used_fallback = markdown_to_description(description_source)
-    warnings = []
+    warnings: Warnings = []
     if used_fallback:
         warnings.append(f"{display_path}: weak/short markdown description")
         warnings.append(f"{display_path}: fallback description used")
@@ -152,21 +189,26 @@ def notebook_metadata(path, display_path, fallback_title):
     return title or fallback_title, description, warnings
 
 
-def plan_notebooks(repo_dir, config):
-    metadata = {}
-    planned = []
-    warnings = []
-    seen = {}
+def plan_notebooks(
+    repo_dir: Path, config: Config
+) -> tuple[PlannedNotebooks, Metadata, Warnings]:
+    metadata: Metadata = {}
+    planned: PlannedNotebooks = []
+    warnings: Warnings = []
+    seen: dict[str, Path] = {}
 
     for notebook in find_notebooks(repo_dir):
         relative = notebook.relative_to(repo_dir)
-        stripped = strip_path_prefix(relative, config.get("strip_path_prefixes", []))
+        strip_path_prefixes = config.get("strip_path_prefixes", [])
+        if not isinstance(strip_path_prefixes, list):
+            strip_path_prefixes = []
+        stripped = strip_path_prefix(relative, strip_path_prefixes)
         output_name = output_name_for(stripped)
         if output_name in seen:
             first = seen[output_name]
             raise ValueError(
-                "Notebook name collision after flattening: "
-                f"'{first}' and '{relative}' both become '{output_name}'"
+                f"Notebook name collision after flattening: '{first}' and "
+                f"'{relative}' both become '{output_name}'"
             )
         seen[output_name] = relative
 
@@ -192,19 +234,21 @@ def plan_notebooks(repo_dir, config):
     return planned, metadata, warnings
 
 
-def stage_notebooks(repo_dir, staging_dir, config):
+def stage_notebooks(
+    repo_dir: Path, staging_dir: Path, config: Config
+) -> tuple[PlannedNotebooks, Metadata, Warnings]:
     planned, metadata, warnings = plan_notebooks(repo_dir, config)
     staging_dir.mkdir(parents=True, exist_ok=True)
     for relative, output_name in planned:
-        shutil.copy2(repo_dir / relative, staging_dir / output_name)
+        _ = shutil.copy2(repo_dir / relative, staging_dir / output_name)
 
-    (staging_dir / "metadata.json").write_text(
+    _ = (staging_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
     )
     return planned, metadata, warnings
 
 
-def create_archive(staging_dir, output_path):
+def create_archive(staging_dir: Path, output_path: PathInput) -> None:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(output_path, "w:gz", format=tarfile.GNU_FORMAT) as archive:
@@ -213,9 +257,9 @@ def create_archive(staging_dir, output_path):
                 archive.add(path, arcname=path.name, recursive=False)
 
 
-def clone_repo(repo_url, destination):
+def clone_repo(repo_url: str, destination: Path) -> None:
     try:
-        subprocess.run(
+        _ = subprocess.run(
             ["git", "clone", "--depth", "1", repo_url, str(destination)],
             check=True,
             stdout=subprocess.PIPE,
@@ -223,17 +267,28 @@ def clone_repo(repo_url, destination):
             text=True,
         )
     except subprocess.CalledProcessError as error:
-        stderr = error.stderr.strip() or "git clone failed"
+        stderr_value: object = error.stderr
+        stderr = (
+            stderr_value.strip() if isinstance(stderr_value, str) else "git clone failed"
+        )
+        stderr = stderr or "git clone failed"
         raise ValueError(f"Could not clone repository: {stderr}") from error
 
 
-def truncate_text(text, max_length=80):
+def truncate_text(text: str, max_length: int = 80) -> str:
     if len(text) <= max_length:
         return text
     return text[: max_length - 3].rstrip() + "..."
 
 
-def print_summary(planned, metadata, warnings, staging_dir, output_path, dry_run):
+def print_summary(
+    planned: Sequence[PlannedNotebook],
+    metadata: Metadata,
+    warnings: Warnings,
+    staging_dir: Optional[Path],
+    output_path: Optional[Path],
+    dry_run: bool,
+) -> None:
     label = "Planned notebooks" if dry_run else "Imported notebooks"
     print(f"{label}: {len(planned)}")
     for source, output_name in planned:
@@ -255,6 +310,8 @@ def print_summary(planned, metadata, warnings, staging_dir, output_path, dry_run
     print("Metadata:")
     for key, item in metadata.items():
         description = item["description"]
+        if not isinstance(description, str):
+            description = str(description)
         if dry_run:
             description = truncate_text(description)
         print(f"  {key}: {item['title']} - {description}")
@@ -265,8 +322,8 @@ def print_summary(planned, metadata, warnings, staging_dir, output_path, dry_run
         print(f"Staging: {staging_dir}")
     if dry_run:
         print(
-            "Dry run: no files were copied, metadata was not written, "
-            "and archive was not created"
+            "Dry run: no files were copied, metadata was not written, and archive "
+            "was not created"
         )
 
     if warnings:
@@ -275,9 +332,15 @@ def print_summary(planned, metadata, warnings, staging_dir, output_path, dry_run
             print(f"  {warning}")
 
 
-def build_package(repo_url, config_path, output_path, keep_staging=False, dry_run=False):
+def build_package(
+    repo_url: str,
+    config_path: PathInput,
+    output_path: Path,
+    keep_staging: bool = False,
+    dry_run: bool = False,
+) -> int:
     config = load_config(config_path)
-    warnings = []
+    warnings: Warnings = []
     temp_root = Path(tempfile.mkdtemp(prefix="nbgallery_packager_"))
     repo_dir = temp_root / "repo"
     staging_dir = temp_root / "staging"
@@ -306,20 +369,20 @@ def build_package(repo_url, config_path, output_path, keep_staging=False, dry_ru
             shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def parse_args(argv):
+def parse_args(argv: Sequence[str]) -> ParsedArgs:
     parser = argparse.ArgumentParser(
         description="Package notebooks from a public git repository for nbgallery upload."
     )
-    parser.add_argument("repo_url", help="Public git repository URL")
-    parser.add_argument(
+    _ = parser.add_argument("repo_url", help="Public git repository URL")
+    _ = parser.add_argument(
         "--config", required=True, help="YAML config with owner metadata"
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output",
         default="nbgallery_upload.tar.gz",
         help="Output .tar.gz path",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dry-run",
         action="store_true",
         help=(
@@ -327,15 +390,15 @@ def parse_args(argv):
             "or creating an archive"
         ),
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--keep-staging",
         action="store_true",
         help="Keep the temporary staging directory after the run",
     )
-    return parser.parse_args(argv)
+    return parser.parse_args(argv, namespace=ParsedArgs())
 
 
-def main(argv=None):
+def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
         return build_package(
