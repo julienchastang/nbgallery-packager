@@ -156,8 +156,9 @@ def notebook_metadata(
     for cell in cells:
         if not isinstance(cell, dict):
             continue
-        if cell.get("cell_type") == "markdown":
-            raw_source: object = cell.get("source", "")
+        notebook_cell = cast(dict[str, object], cell)
+        if notebook_cell.get("cell_type") == "markdown":
+            raw_source: object = notebook_cell.get("source", "")
             source: MarkdownSource
             if isinstance(raw_source, list):
                 source = [str(part) for part in raw_source]
@@ -267,7 +268,7 @@ def clone_repo(repo_url: str, destination: Path) -> None:
             text=True,
         )
     except subprocess.CalledProcessError as error:
-        stderr_value: object = error.stderr
+        stderr_value = cast(object, error.stderr)
         stderr = (
             stderr_value.strip() if isinstance(stderr_value, str) else "git clone failed"
         )
